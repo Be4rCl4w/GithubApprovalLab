@@ -186,8 +186,8 @@ resource "azurerm_app_service" "lab" {
   }
 
   identity {
-    type         = "UserAssigned"
-    identity_ids = [azurerm_user_assigned_identity.lab.id]
+    type         = "systemAssigned"
+    
   }
 
   site_config {
