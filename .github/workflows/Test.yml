@@ -1,4 +1,4 @@
-name: Custom SAST Scan
+name: Custom PR Workflow with SAST and IaC Scans
 
 on:
   pull_request:
@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      # Setup Semgrep
       - name: Run Semgrep CI
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
@@ -51,8 +52,30 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_COMMENTS: false
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_COMMENTS: true
         continue-on-error: true
+
+      - name: Run Gitleaks (secret PR scan Comment)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:latest git \
+            --redact \
+            --exit-code 0 \
+            --report-format sarif \
+            --report-path gitleaks-results.sarif
+
+      - name: Run Gitleaks for PR Report
+        if: always()
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:latest git \
+            -v --redact --no-color --exit-code 0 > gitleaks-report.txt 2>&1 || true
+
+      - name: Upload Gitleaks SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: gitleaks-results.sarif
+          category: gitleaks
 
       - name: Run Checkov
         id: checkov
@@ -84,19 +107,17 @@ jobs:
           scan-type: 'fs'
           scan-ref: .
           exit-code: 0
-          severity: CRITICAL,HIGH,MEDIUM
           format: 'sarif'
           output: 'trivy-results.sarif'
 
-      - name: Run Trivy for Markdown PR Report
+      - name: Run Trivy for PR Report
         uses: aquasecurity/trivy-action@v0.36.0
         if: always()
         with:
           scan-type: 'fs'
           scan-ref: .
-          format: 'template'
-          template: '@trivy/github-markdown.tpl'
-          output: 'trivy-report.md'
+          format: 'table'
+          output: 'trivy-report.txt'
 
       - name: Upload Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
@@ -109,7 +130,7 @@ jobs:
         uses: dependency-check/Dependency-Check_Action@main
         id: Depcheck
         with:
-          project: 'Python Project'
+          project: 'Python Projects'
           path: '.'
           # Generates both SARIF and human-readable HTML/Text wrappers
           format: 'ALL'
@@ -130,6 +151,8 @@ jobs:
           if [ -f "results-checkov.txt" ]; then cat results-checkov.txt > checkov-clean.txt; else echo "No data" > checkov-clean.txt; fi
           # Convert or wrap dependency check summaries 
           echo "Dependency check details uploaded to Security tab." > depcheck-summary.txt
+          # Fall back if the gitleaks report wasn't generated for some reason
+          if [ ! -f "gitleaks-report.txt" ]; then echo "No Gitleaks report found." > gitleaks-report.txt; fi
 
       - name: Upload Automation Artifacts
         uses: actions/upload-artifact@v4
@@ -138,8 +161,9 @@ jobs:
           name: iac-vuln-reports
           path: |
             checkov-clean.txt
-            trivy-report.md
+            trivy-report.txt
             depcheck-summary.txt
+            gitleaks-report.txt
 
   comment-pr:
     runs-on: ubuntu-latest
@@ -150,13 +174,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: semgrep-report
-          ignore-on-missing: true
 
       - name: Download Scan Artifacts
         uses: actions/download-artifact@v4
         with:
           name: iac-vuln-reports
-          ignore-on-missing: true
 
       - name: Assemble Dashboard & Comment
         run: |
@@ -170,17 +192,25 @@ jobs:
           echo "\`\`\`" >> final-pr-comment.md
           echo "</details><br>" >> final-pr-comment.md
 
-          echo "<details><summary><b>2. Checkov IaC Infrastructure Analysis</b></summary>" >> final-pr-comment.md
+          echo "<details><summary><b>2. Gitleaks Secret Scan</b></summary>" >> final-pr-comment.md
+          echo "\`\`\`text" >> final-pr-comment.md
+          if [ -f "gitleaks-report.txt" ]; then cat gitleaks-report.txt >> final-pr-comment.md; else echo "No Gitleaks report found." >> final-pr-comment.md; fi
+          echo "\`\`\`" >> final-pr-comment.md
+          echo "</details><br>" >> final-pr-comment.md
+
+          echo "<details><summary><b>3. Checkov IaC Infrastructure Analysis</b></summary>" >> final-pr-comment.md
           echo "\`\`\`text" >> final-pr-comment.md
           if [ -f "checkov-clean.txt" ]; then cat checkov-clean.txt >> final-pr-comment.md; else echo "No Checkov report found." >> final-pr-comment.md; fi
           echo "\`\`\`" >> final-pr-comment.md
           echo "</details><br>" >> final-pr-comment.md
 
-          echo "<details><summary><b>3. Trivy Vulnerability Scan</b></summary>" >> final-pr-comment.md
-          if [ -f "trivy-report.md" ]; then cat trivy-report.md >> final-pr-comment.md; else echo "No Trivy report found." >> final-pr-comment.md; fi
+          echo "<details><summary><b>4. Trivy Vulnerability Scan</b></summary>" >> final-pr-comment.md
+          echo "\`\`\`text" >> final-pr-comment.md
+          if [ -f "trivy-report.txt" ]; then cat trivy-report.txt >> final-pr-comment.md; else echo "No Trivy report found." >> final-pr-comment.md; fi
+          echo "\`\`\`" >> final-pr-comment.md
           echo "</details><br>" >> final-pr-comment.md
 
-          echo "<details><summary><b>4. OWASP Dependency Check</b></summary>" >> final-pr-comment.md
+          echo "<details><summary><b>5. OWASP Dependency Check</b></summary>" >> final-pr-comment.md
           echo "\`\`\`text" >> final-pr-comment.md
           if [ -f "depcheck-summary.txt" ]; then cat depcheck-summary.txt >> final-pr-comment.md; else echo "No Dependency check summary." >> final-pr-comment.md; fi
           echo "\`\`\`" >> final-pr-comment.md
