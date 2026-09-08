@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      # Setup Semgrep
       - name: Run Semgrep CI
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
@@ -129,7 +130,7 @@ jobs:
         uses: dependency-check/Dependency-Check_Action@main
         id: Depcheck
         with:
-          project: 'Python Project'
+          project: 'Python Projects'
           path: '.'
           # Generates both SARIF and human-readable HTML/Text wrappers
           format: 'ALL'
