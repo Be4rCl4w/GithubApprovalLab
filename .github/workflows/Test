@@ -1,0 +1,192 @@
+name: Custom SAST Scan
+
+on:
+  pull_request:
+    branches: ["main"]
+
+permissions: 
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  semgrep-ci:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    if: (github.actor != 'dependabot[bot]')
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Semgrep CI
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        # Generates human-readable text output while running CI scan
+        run: |
+          semgrep ci --text > semgrep-report.txt 2>&1 || true
+          cat semgrep-report.txt
+
+      - name: Upload Semgrep Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.txt
+
+  checkov-scan:
+    runs-on: ubuntu-latest
+    if: (github.actor != 'dependabot[bot]')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Run Gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: false
+        continue-on-error: true
+
+      - name: Run Checkov
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          quiet: true
+          # Generates both SARIF and CLI text outputs simultaneously
+          output_format: sarif,cli
+          output_file_path: results.sarif,results-checkov.txt
+          soft_fail: true
+
+      - name: Upload Checkov SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
+          category: checkov
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run Trivy vulnerability scanner (IaC)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: .
+          exit-code: 0
+          severity: CRITICAL,HIGH,MEDIUM
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Run Trivy for Markdown PR Report
+        uses: aquasecurity/trivy-action@v0.36.0
+        if: always()
+        with:
+          scan-type: 'fs'
+          scan-ref: .
+          format: 'template'
+          template: '@trivy/github-markdown.tpl'
+          output: 'trivy-report.md'
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      - name: Depcheck
+        uses: dependency-check/Dependency-Check_Action@main
+        id: Depcheck
+        with:
+          project: 'Python Project'
+          path: '.'
+          # Generates both SARIF and human-readable HTML/Text wrappers
+          format: 'ALL'
+          out: 'reports'
+
+      - name: Upload Dependency-Check SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: reports/dependency-check-report.sarif
+          category: dependency-check
+
+      # Formatting the text outputs for the consolidated step
+      - name: Prepare Text Reports
+        if: always()
+        run: |
+          # Clean checkov output path wrappers
+          if [ -f "results-checkov.txt" ]; then cat results-checkov.txt > checkov-clean.txt; else echo "No data" > checkov-clean.txt; fi
+          # Convert or wrap dependency check summaries 
+          echo "Dependency check details uploaded to Security tab." > depcheck-summary.txt
+
+      - name: Upload Automation Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iac-vuln-reports
+          path: |
+            checkov-clean.txt
+            trivy-report.md
+            depcheck-summary.txt
+
+  comment-pr:
+    runs-on: ubuntu-latest
+    needs: [semgrep-ci, checkov-scan]
+    if: always() && (github.actor != 'dependabot[bot]')
+    steps:
+      - name: Download Semgrep Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: semgrep-report
+          ignore-on-missing: true
+
+      - name: Download Scan Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: iac-vuln-reports
+          ignore-on-missing: true
+
+      - name: Assemble Dashboard & Comment
+        run: |
+          echo "## 🛡️ Combined Static Analysis Security Report" > final-pr-comment.md
+          echo "Scans triggered by push/synchronize actions." >> final-pr-comment.md
+          echo "" >> final-pr-comment.md
+
+          echo "<details><summary><b>1. Semgrep Code Analysis</b></summary>" >> final-pr-comment.md
+          echo "\`\`\`text" >> final-pr-comment.md
+          if [ -f "semgrep-report.txt" ]; then cat semgrep-report.txt >> final-pr-comment.md; else echo "No Semgrep report found." >> final-pr-comment.md; fi
+          echo "\`\`\`" >> final-pr-comment.md
+          echo "</details><br>" >> final-pr-comment.md
+
+          echo "<details><summary><b>2. Checkov IaC Infrastructure Analysis</b></summary>" >> final-pr-comment.md
+          echo "\`\`\`text" >> final-pr-comment.md
+          if [ -f "checkov-clean.txt" ]; then cat checkov-clean.txt >> final-pr-comment.md; else echo "No Checkov report found." >> final-pr-comment.md; fi
+          echo "\`\`\`" >> final-pr-comment.md
+          echo "</details><br>" >> final-pr-comment.md
+
+          echo "<details><summary><b>3. Trivy Vulnerability Scan</b></summary>" >> final-pr-comment.md
+          if [ -f "trivy-report.md" ]; then cat trivy-report.md >> final-pr-comment.md; else echo "No Trivy report found." >> final-pr-comment.md; fi
+          echo "</details><br>" >> final-pr-comment.md
+
+          echo "<details><summary><b>4. OWASP Dependency Check</b></summary>" >> final-pr-comment.md
+          echo "\`\`\`text" >> final-pr-comment.md
+          if [ -f "depcheck-summary.txt" ]; then cat depcheck-summary.txt >> final-pr-comment.md; else echo "No Dependency check summary." >> final-pr-comment.md; fi
+          echo "\`\`\`" >> final-pr-comment.md
+          echo "</details>" >> final-pr-comment.md
+
+          gh pr comment ${{ github.event.pull_request.number }} --body-file final-pr-comment.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
