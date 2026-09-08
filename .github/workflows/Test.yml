@@ -55,7 +55,7 @@ jobs:
           GITLEAKS_ENABLE_COMMENTS: true
         continue-on-error: true
 
-      - name: Run Gitleaks (secret PR scan)
+      - name: Run Gitleaks (secret PR scan Comment)
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:latest git \
             --redact \
