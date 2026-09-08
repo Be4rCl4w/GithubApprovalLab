@@ -1,8 +1,9 @@
 name: Custom SAST Scan
 
 on:
-  pull_request:
-    branches: ["main"]
+  #pull_request:
+    #branches: ["main"]
+  workflow_dispatch:
 
 permissions: 
   contents: read
